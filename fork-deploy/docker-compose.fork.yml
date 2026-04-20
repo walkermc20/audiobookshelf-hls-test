@@ -20,7 +20,7 @@
 
 services:
   audiobookshelf-fork:
-    image: ghcr.io/walkermc20/audiobookshelf:claude-bold-burnell-0e3fa2
+    image: ghcr.io/walkermc20/audiobookshelf:ios-hls-persistent
     container_name: audiobookshelf-fork
     ports:
       - "13379:80"
