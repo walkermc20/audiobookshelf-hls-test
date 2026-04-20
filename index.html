@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ABS HLS Test Client</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 900px; margin: 1rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.2rem; margin: 0 0 1rem; }
+    fieldset { border: 1px solid #888; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+    legend { font-weight: 600; }
+    label { display: block; font-size: 0.85rem; margin-top: 0.5rem; }
+    input[type=text], input[type=password] { width: 100%; padding: 0.3rem; font-family: monospace; }
+    .row { display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; }
+    button { padding: 0.5rem 1rem; font-size: 0.9rem; cursor: pointer; margin-right: 0.5rem; }
+    video, audio { width: 100%; margin-top: 0.5rem; }
+    pre { background: rgba(128,128,128,0.1); padding: 0.5rem; overflow: auto; max-height: 300px; font-size: 0.8rem; }
+    .log-line { font-family: monospace; font-size: 0.75rem; white-space: pre-wrap; }
+    .log-line.err { color: #c33; }
+    .log-line.ok { color: #393; }
+    .status { font-family: monospace; font-size: 0.85rem; margin-top: 0.5rem; }
+    .small { font-size: 0.75rem; opacity: 0.7; }
+  </style>
+</head>
+<body>
+
+<h1>Audiobookshelf HLS Test Client</h1>
+<p class="small">
+  Proves end-to-end HLS streaming against an ABS server. Uses the existing
+  <code>/api/items/:id/play</code> endpoint with <code>forceTranscode: true</code>
+  to get an HLS manifest, then plays it with hls.js (the same MPEG-TS HLS flow
+  that an iOS AVPlayer/AVAssetDownloadURLSession would consume).
+</p>
+
+<fieldset>
+  <legend>1. Server</legend>
+  <div class="row">
+    <div>
+      <label>ABS base URL (e.g. <code>http://192.168.1.10:13378</code>)</label>
+      <input id="absUrl" type="text" placeholder="http://your-abs-host:13378" />
+    </div>
+    <div>
+      <label>API token (Settings &rarr; Users &rarr; your user &rarr; API token)</label>
+      <input id="absToken" type="password" placeholder="paste token" />
+    </div>
+  </div>
+  <label><input id="persistCreds" type="checkbox" checked /> Remember in localStorage</label>
+</fieldset>
+
+<fieldset>
+  <legend>2. Item to play</legend>
+  <div class="row">
+    <div>
+      <label>Library item ID</label>
+      <input id="itemId" type="text" placeholder="li_xxxxxxxxxxxxxxxxxxxxx" />
+    </div>
+    <div>
+      <label>Episode ID (podcasts only, leave blank for books)</label>
+      <input id="episodeId" type="text" placeholder="" />
+    </div>
+  </div>
+  <label><input id="forceTranscode" type="checkbox" checked /> <code>forceTranscode: true</code> (required to trigger HLS path today)</label>
+  <div style="margin-top: 0.5rem;">
+    <button id="btnBrowse">Browse libraries / items</button>
+    <button id="btnPlay">Request playback session &amp; load</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>3. Player</legend>
+  <video id="player" controls preload="none"></video>
+  <div class="status" id="status">idle</div>
+</fieldset>
+
+<fieldset>
+  <legend>Last play response</legend>
+  <pre id="sessionResp">(none)</pre>
+</fieldset>
+
+<fieldset>
+  <legend>Activity log</legend>
+  <pre id="log"></pre>
+</fieldset>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const PROXY_PREFIX = '/upstream';
+
+function log(msg, cls = '') {
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = `${new Date().toISOString().slice(11,23)}  ${msg}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(s) { $('status').textContent = s; }
+
+// Persist creds
+function loadCreds() {
+  if (localStorage.getItem('abs-url')) $('absUrl').value = localStorage.getItem('abs-url');
+  if (localStorage.getItem('abs-token')) $('absToken').value = localStorage.getItem('abs-token');
+  if (localStorage.getItem('abs-itemid')) $('itemId').value = localStorage.getItem('abs-itemid');
+  if (localStorage.getItem('abs-epid')) $('episodeId').value = localStorage.getItem('abs-epid');
+}
+function saveCreds() {
+  if (!$('persistCreds').checked) return;
+  localStorage.setItem('abs-url', $('absUrl').value);
+  localStorage.setItem('abs-token', $('absToken').value);
+  localStorage.setItem('abs-itemid', $('itemId').value);
+  localStorage.setItem('abs-epid', $('episodeId').value);
+}
+loadCreds();
+
+function upstreamFetch(pathAndQuery, init = {}) {
+  const upstream = $('absUrl').value.trim();
+  const token = $('absToken').value.trim();
+  if (!upstream) throw new Error('ABS URL is required');
+  const headers = new Headers(init.headers || {});
+  headers.set('x-upstream', upstream);
+  if (token) headers.set('Authorization', 'Bearer ' + token);
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  return fetch(PROXY_PREFIX + pathAndQuery, { ...init, headers });
+}
+
+$('btnBrowse').addEventListener('click', async () => {
+  saveCreds();
+  setStatus('listing libraries...');
+  try {
+    const libs = await upstreamFetch('/api/libraries').then(r => r.json());
+    const list = (libs.libraries || libs || []).slice(0, 5);
+    log(`found ${list.length} libraries. Picking first non-empty...`, 'ok');
+    for (const lib of list) {
+      const res = await upstreamFetch(`/api/libraries/${lib.id}/items?limit=5`).then(r => r.json());
+      const items = res.results || [];
+      log(`library "${lib.name}" (${lib.id}): ${items.length} items`, 'ok');
+      items.forEach(it => {
+        const title = (it.media && it.media.metadata && it.media.metadata.title) || '(no title)';
+        log(`  ${it.id}  ${title}`);
+      });
+      if (items.length) {
+        $('itemId').value = items[0].id;
+        break;
+      }
+    }
+    setStatus('listing done');
+  } catch (e) {
+    log('browse error: ' + e.message, 'err');
+    setStatus('error');
+  }
+});
+
+let hls = null;
+
+$('btnPlay').addEventListener('click', async () => {
+  saveCreds();
+  const itemId = $('itemId').value.trim();
+  const epId = $('episodeId').value.trim();
+  if (!itemId) return alert('Need a library item ID');
+
+  const playPath = epId
+    ? `/api/items/${itemId}/play/${epId}`
+    : `/api/items/${itemId}/play`;
+
+  const body = {
+    // No supportedMimeTypes => server cannot direct-play, will transcode to HLS.
+    // If forceTranscode is unchecked, we send an empty list instead and rely on
+    // the default behaviour (which for typical MP3/M4B will return direct-play).
+    mediaPlayer: 'ios-hls', // informational for now; existing server ignores it
+    forceTranscode: $('forceTranscode').checked,
+    forceDirectPlay: false,
+    supportedMimeTypes: [],
+    deviceInfo: { deviceId: 'hls-test-client', clientName: 'HlsTest', clientVersion: '0.1.0' }
+  };
+
+  setStatus('requesting playback session...');
+  log(`POST ${playPath}  ${JSON.stringify(body)}`);
+  let session;
+  try {
+    const resp = await upstreamFetch(playPath, { method: 'POST', body: JSON.stringify(body) });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}: ${await resp.text()}`);
+    session = await resp.json();
+  } catch (e) {
+    log('play request failed: ' + e.message, 'err');
+    setStatus('error');
+    return;
+  }
+  $('sessionResp').textContent = JSON.stringify(session, null, 2);
+  log(`session ${session.id} playMethod=${session.playMethod}`, 'ok');
+
+  const track = (session.audioTracks || [])[0];
+  if (!track) {
+    log('no audioTracks in session response', 'err');
+    return;
+  }
+  log(`audioTrack[0] contentUrl=${track.contentUrl}  mimeType=${track.mimeType}`);
+
+  const manifestUrl = PROXY_PREFIX + track.contentUrl;
+  const isHls = track.mimeType && track.mimeType.includes('mpegurl');
+  if (!isHls) {
+    log(`track is not HLS (mime=${track.mimeType}). Playing directly (progressive).`, 'err');
+    const video = $('player');
+    video.src = manifestUrl;
+    video.play().catch(e => log('play() rejected: ' + e.message, 'err'));
+    setStatus('progressive playback');
+    return;
+  }
+
+  // HLS path
+  setStatus('loading HLS manifest...');
+  const video = $('player');
+  if (hls) { try { hls.destroy(); } catch(e) {} }
+
+  hls = new Hls({
+    xhrSetup: (xhr) => {
+      const upstream = $('absUrl').value.trim();
+      const token = $('absToken').value.trim();
+      xhr.setRequestHeader('x-upstream', upstream);
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    }
+  });
+
+  let segsLoaded = 0;
+  hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+    log(`manifest parsed: ${data.levels.length} levels, ${(data.levels[0] && data.levels[0].details && data.levels[0].details.fragments && data.levels[0].details.fragments.length) || '?'} fragments`, 'ok');
+    setStatus('manifest ok; starting playback');
+    video.play().catch(e => log('play() rejected: ' + e.message + ' (click play manually)', 'err'));
+  });
+  hls.on(Hls.Events.FRAG_LOADED, (_, data) => {
+    segsLoaded++;
+    if (segsLoaded <= 5 || segsLoaded % 10 === 0) {
+      log(`segment loaded #${data.frag.sn}  (${segsLoaded} total)`, 'ok');
+    }
+  });
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    log(`hls error: ${data.type}/${data.details} fatal=${data.fatal}`, 'err');
+    if (data.response) log(`  response: ${data.response.code} ${data.response.text || ''}`, 'err');
+  });
+
+  hls.loadSource(manifestUrl);
+  hls.attachMedia(video);
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,43 @@
+# Parallel ABS fork deployment for iOS HLS testing.
+#
+# Runs alongside your existing ABS on a different port with its own
+# metadata + config, pointed at the same media library (read-only).
+# The fork container enables the iOS HLS persistent stream path via
+# the ENABLE_IOS_HLS_PERSIST env var.
+#
+# Before running:
+#   1. docker login ghcr.io   (use a PAT with read:packages)
+#   2. Edit the `image:` tag below to match your fork + the tag the
+#      GitHub Actions workflow published (default "ios-hls").
+#   3. Edit the volume paths to point at your actual library folders.
+#   4. Choose an unused host port (13379 assumed; change if taken).
+#
+# Run:
+#   docker compose -f docker-compose.fork.yml up -d
+#
+# Stop:
+#   docker compose -f docker-compose.fork.yml down
+
+services:
+  audiobookshelf-fork:
+    image: ghcr.io/walkermc20/audiobookshelf:claude-bold-burnell-0e3fa2
+    container_name: audiobookshelf-fork
+    ports:
+      - "13379:80"
+    environment:
+      # The only knob the fork adds. Without this set to '1', the fork
+      # behaves identically to upstream ABS.
+      ENABLE_IOS_HLS_PERSIST: "1"
+      # Uncomment if you want to pin the internal port:
+      # PORT: "80"
+    volumes:
+      # Point at the SAME library dirs as your existing ABS instance,
+      # so you see the same books without a second copy. The fork only
+      # reads media; progress state lives in its own metadata/config.
+      - ./audiobooks:/audiobooks:ro
+      - ./podcasts:/podcasts:ro
+      # Dedicated metadata + config so the fork's DB doesn't collide
+      # with your production ABS.
+      - ./metadata-fork:/metadata
+      - ./config-fork:/config
+    restart: unless-stopped
