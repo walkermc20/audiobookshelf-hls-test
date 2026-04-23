@@ -59,7 +59,15 @@ In the page:
 See `fork-deploy/docker-compose.fork.yml` for a sample parallel deployment
 of a forked ABS with the persistent-HLS patch enabled.
 
+## Test run archive
+
+See [`test-runs/`](./test-runs/) for recorded end-to-end runs of the
+automated suite against the fork. Each run is a markdown file with
+metadata, the 14-test matrix, observations, and a scoped server-log
+excerpt. Most recent:
+[2026-04-23 / `93ac4c6c` / 14 of 14 PASS](./test-runs/2026-04-23_93ac4c6c_14of14.md).
+
 ## Related
 
 - Reference server-side patch: https://github.com/walkermc20/audiobookshelf/commit/ac47208a
-- Public test image: `ghcr.io/walkermc20/audiobookshelf:claude-bold-burnell-0e3fa2`
+- Public test image: `ghcr.io/walkermc20/audiobookshelf:ios-hls-persistent`
