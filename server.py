@@ -165,16 +165,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def do_GET(self):
+    def _dispatch(self, static_ok=False):
         if self.path == PREFIX or self.path.startswith(PREFIX + '/'):
             return self._proxy()
-        return self._serve_static()
-
-    def do_POST(self):
-        if self.path == PREFIX or self.path.startswith(PREFIX + '/'):
-            return self._proxy()
+        if static_ok:
+            return self._serve_static()
         self.send_response(405)
         self.end_headers()
+
+    def do_GET(self):
+        return self._dispatch(static_ok=True)
+
+    def do_POST(self):
+        return self._dispatch()
+
+    def do_PUT(self):
+        return self._dispatch()
+
+    def do_PATCH(self):
+        return self._dispatch()
+
+    def do_DELETE(self):
+        return self._dispatch()
 
 
 def main():
