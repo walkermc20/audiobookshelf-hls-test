@@ -80,6 +80,42 @@
 </fieldset>
 
 <fieldset>
+  <legend>4. Automated test suite (fork only)</legend>
+  <p class="small">
+    Exercises the persistence + auth matrix added by the
+    <code>ENABLE_IOS_HLS_PERSIST</code> fork. Reuses the ABS URL, User 1 token,
+    and library item above. Needs a second user — create one via the ABS admin
+    UI, grab their API token, paste below. Safe to rerun; each run creates and
+    cleans up its own sessions.
+  </p>
+  <div class="row">
+    <div>
+      <label>User 2 API token (non-admin)</label>
+      <input id="user2Token" type="password" placeholder="token for a second user on the same server" />
+    </div>
+    <div>
+      <label>Library item ID override (optional)</label>
+      <input id="testItemId" type="text" placeholder="falls back to field 2 above" />
+    </div>
+  </div>
+  <label><input id="persistTestCreds" type="checkbox" checked /> Remember User 2 token in localStorage</label>
+  <div style="margin-top: 0.5rem;">
+    <button id="btnRunTests">Run test suite</button>
+  </div>
+  <table id="testResults" style="width: 100%; margin-top: 0.75rem; border-collapse: collapse; font-size: 0.82rem;">
+    <thead>
+      <tr>
+        <th style="text-align: left; padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,0.4);">Test</th>
+        <th style="padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,0.4);">Expected</th>
+        <th style="padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,0.4);">Actual</th>
+        <th style="padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,0.4);">Result</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</fieldset>
+
+<fieldset>
   <legend>Activity log</legend>
   <pre id="log"></pre>
 </fieldset>
@@ -243,6 +279,164 @@ $('btnPlay').addEventListener('click', async () => {
   hls.loadSource(manifestUrl);
   hls.attachMedia(video);
 });
+
+// ====================================================================
+// Test suite (fork-only)
+// ====================================================================
+
+function loadTestCreds() {
+  const u2 = localStorage.getItem('abs-user2-token');
+  if (u2) $('user2Token').value = u2;
+  const tid = localStorage.getItem('abs-test-itemid');
+  if (tid) $('testItemId').value = tid;
+}
+function saveTestCreds() {
+  if (!$('persistTestCreds').checked) return;
+  localStorage.setItem('abs-user2-token', $('user2Token').value);
+  localStorage.setItem('abs-test-itemid', $('testItemId').value);
+}
+loadTestCreds();
+
+function testFetch(pathAndQuery, init = {}, token) {
+  const upstream = $('absUrl').value.trim();
+  const headers = new Headers(init.headers || {});
+  headers.set('x-upstream', upstream);
+  if (token) headers.set('Authorization', 'Bearer ' + token);
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  return fetch(PROXY_PREFIX + pathAndQuery, { ...init, headers });
+}
+
+async function startPlaySession(itemId, token) {
+  const body = {
+    mediaPlayer: 'ios-hls',
+    forceTranscode: true,
+    forceDirectPlay: false,
+    supportedMimeTypes: [],
+    deviceInfo: { deviceId: 'hls-test-suite', clientName: 'HlsTest-Suite', clientVersion: '0.1.0' }
+  };
+  const resp = await testFetch(`/api/items/${itemId}/play`, { method: 'POST', body: JSON.stringify(body) }, token);
+  if (!resp.ok) throw new Error(`play request failed: ${resp.status} ${resp.statusText}`);
+  return resp.json();
+}
+
+function renderTestRow(name, result) {
+  const tbody = document.querySelector('#testResults tbody');
+  const tr = document.createElement('tr');
+  const cls = result.pass ? 'ok' : 'err';
+  const resultText = result.pass ? 'PASS' : 'FAIL';
+  const note = result.note ? ` — ${result.note}` : '';
+  tr.innerHTML = `
+    <td style="padding: 4px 8px; border-bottom: 1px solid rgba(128,128,128,0.15);">${name}</td>
+    <td style="padding: 4px 8px; text-align: center;">${result.expected ?? ''}</td>
+    <td style="padding: 4px 8px; text-align: center;">${result.actual ?? ''}</td>
+    <td style="padding: 4px 8px;" class="log-line ${cls}">${resultText}${note}</td>
+  `;
+  tbody.appendChild(tr);
+}
+
+const testSuite = [
+  { name: '1. User 1 token valid (GET /api/me)', critical: true, run: async (ctx) => {
+      const r = await testFetch('/api/me', {}, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '2. User 2 token valid (GET /api/me)', critical: true, run: async (ctx) => {
+      const r = await testFetch('/api/me', {}, ctx.user2Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '3. Create session A (User 1, mediaPlayer=ios-hls)', critical: true, run: async (ctx) => {
+      const s = await startPlaySession(ctx.itemId, ctx.user1Token);
+      ctx.sessionA = s.id;
+      return { pass: !!s.id && s.playMethod === 2, actual: `${s.id?.slice(0, 8)}… pm=${s.playMethod}`, expected: 'uuid pm=2', note: s.playMethod !== 2 ? 'expected playMethod=2 (TRANSCODE); is the fork enabled?' : null };
+  }},
+  { name: '4. Manifest A fetchable (session in memory)', run: async (ctx) => {
+      const r = await testFetch(`/hls/${ctx.sessionA}/output.m3u8`, {}, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '5. Create session B (User 1, auto-closes A)', critical: true, run: async (ctx) => {
+      const s = await startPlaySession(ctx.itemId, ctx.user1Token);
+      ctx.sessionB = s.id;
+      await new Promise(res => setTimeout(res, 400));
+      return { pass: s.id !== ctx.sessionA, actual: s.id === ctx.sessionA ? 'same as A' : 'new', expected: 'new' };
+  }},
+  { name: '6. Manifest A still serves after A closed (persistence)', run: async (ctx) => {
+      const r = await testFetch(`/hls/${ctx.sessionA}/output.m3u8`, {}, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200, note: r.status === 200 ? null : 'marker/HlsRouter fallback failed' };
+  }},
+  { name: '7. User 2 DELETE on session A → 403 (marker-based auth)', run: async (ctx) => {
+      const r = await testFetch(`/api/session/${ctx.sessionA}/hls-cache`, { method: 'DELETE' }, ctx.user2Token);
+      return { pass: r.status === 403, actual: r.status, expected: 403, note: r.status === 200 ? 'SECURITY: cross-user delete succeeded' : null };
+  }},
+  { name: '8. Manifest A still serves after forbidden DELETE', run: async (ctx) => {
+      const r = await testFetch(`/hls/${ctx.sessionA}/output.m3u8`, {}, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '9. User 1 DELETE on session A → 200', run: async (ctx) => {
+      const r = await testFetch(`/api/session/${ctx.sessionA}/hls-cache`, { method: 'DELETE' }, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '10. Manifest A 404 after owner DELETE (full round-trip)', run: async (ctx) => {
+      const r = await testFetch(`/hls/${ctx.sessionA}/output.m3u8`, {}, ctx.user1Token);
+      return { pass: r.status === 404, actual: r.status, expected: 404 };
+  }},
+  { name: '11. DELETE session A again → 200 (idempotent)', run: async (ctx) => {
+      const r = await testFetch(`/api/session/${ctx.sessionA}/hls-cache`, { method: 'DELETE' }, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '12. DELETE with non-UUID path → 400', run: async (ctx) => {
+      const r = await testFetch('/api/session/not-a-uuid/hls-cache', { method: 'DELETE' }, ctx.user1Token);
+      return { pass: r.status === 400, actual: r.status, expected: 400 };
+  }},
+  { name: '13. DELETE with unknown UUID → 200 (idempotent)', run: async (ctx) => {
+      const r = await testFetch('/api/session/00000000-0000-4000-8000-000000000000/hls-cache', { method: 'DELETE' }, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }},
+  { name: '14. Cleanup: DELETE session B → 200', run: async (ctx) => {
+      if (!ctx.sessionB) return { pass: true, actual: 'skipped', expected: 200 };
+      const r = await testFetch(`/api/session/${ctx.sessionB}/hls-cache`, { method: 'DELETE' }, ctx.user1Token);
+      return { pass: r.status === 200, actual: r.status, expected: 200 };
+  }}
+];
+
+async function runTestSuite() {
+  saveTestCreds();
+  const tbody = document.querySelector('#testResults tbody');
+  tbody.innerHTML = '';
+
+  const ctx = {
+    user1Token: $('absToken').value.trim(),
+    user2Token: $('user2Token').value.trim(),
+    itemId: $('testItemId').value.trim() || $('itemId').value.trim()
+  };
+
+  if (!$('absUrl').value.trim()) { alert('ABS URL is empty (field 1)'); return; }
+  if (!ctx.user1Token) { alert('User 1 token is empty (field 1)'); return; }
+  if (!ctx.user2Token) { alert('User 2 token is empty (field 4)'); return; }
+  if (!ctx.itemId) { alert('Library item ID is empty (field 2 or 4)'); return; }
+
+  log('==== running test suite ====', 'ok');
+  let aborted = false;
+  let passCount = 0, failCount = 0;
+  for (const test of testSuite) {
+    let result;
+    try {
+      result = await test.run(ctx);
+    } catch (e) {
+      result = { pass: false, note: e.message };
+    }
+    renderTestRow(test.name, result);
+    if (result.pass) passCount++; else failCount++;
+    if (!result.pass && test.critical) {
+      renderTestRow('(aborted: critical step failed — subsequent tests skipped)', { pass: false, expected: '', actual: '' });
+      aborted = true;
+      break;
+    }
+  }
+  log(`==== test suite ${aborted ? 'aborted' : 'complete'}: ${passCount} pass, ${failCount} fail ====`, failCount === 0 && !aborted ? 'ok' : 'err');
+}
+
+$('btnRunTests').addEventListener('click', runTestSuite);
+$('user2Token').addEventListener('change', saveTestCreds);
+$('testItemId').addEventListener('change', saveTestCreds);
 </script>
 
 </body>
